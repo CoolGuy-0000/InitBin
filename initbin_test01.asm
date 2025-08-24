@@ -3,85 +3,24 @@ FORMAT PE64 GUI 4.0 DLL
 ENTRY code_start
 
 section 'code' code readable writeable executable
+
+DD code_size
+
 code_start = $
 
 call GetCurrentAddress
 mov rbp, rax
 
-mov [rbp+_PREV_STACK01], rsp
-and rsp, 0FFFFFFFFFFFFFFF0h
-
-mov [rbp+_BP], rbp
-
 call GetKernelModuleHandle
-mov [rbp+_KERNEL], rax
 
-push 2CEh
-push rax
-call FindFuncByOrdinal
-mov [rbp+GetProcAddress], rax
-mov rsi, rax
+lea rdx, [rbp+_str.LoadLibraryA]
+mov rcx, rax
+call FindFuncByName
 
-lea rdi, [rbp+__func_init__]
-
-L_func_init:
-mov rdx, [rdi]
-add rdx, rbp
-mov rcx, [rbp+_KERNEL]
-call rsi
-mov [rdi], rax
-lea rdi, [rdi+8]
-cmp QWORD PTR rdi, 0
-jnz L_func_init
-
-sub rsp, 8
-push 0
-push 0
-lea r9, [rbp+_BP]
-lea r8, [rbp+_ThreadRoutine]
-mov rdx, 1000h
-mov rcx, 0
-call QWORD PTR rbp+CreateThread
-add rsp, 8
-
-lea rcx, [rbp+_str.my_module_name]
-call QWORD PTR rbp+GetModuleHandleA
-mov [rbp+my_module], rax
-
-mov rcx, [rax+6] ;entry origin
-add rcx, rax
-
-mov rsp, [rbp+_PREV_STACK01]
-jmp rcx
-
-_ThreadRoutine = $-code_start
-mov rbp, [rcx]
-
-mov [rbp+_PREV_STACK02], rsp
-and rsp, 0FFFFFFFFFFFFFFF0h
-
-lea rcx, [rbp+_str.USER32]
-call QWORD PTR rbp+GetModuleHandleA
-mov [rbp+_USER32], rax
-
-mov rsi, [rbp+GetProcAddress]
-lea rdi, [rbp+__func_init_user__]
-
-L_func_init_user:
-mov rdx, [rdi]
-add rdx, rbp
-mov rcx, [rbp+_USER32]
-call rsi
-mov [rdi], rax
-lea rdi, [rdi+8]
-cmp QWORD PTR rdi, 0
-jnz L_func_init_user
-
-mov r9, 0
-lea r8, [rbp+_str.msg_success]
-lea rdx, [rbp+_str.msg_success]
-mov rcx, 0
-call QWORD PTR rbp+MessageBoxA
+sub rsp, 18h
+lea rcx, [rbp+_str.BridgePath]
+call rax
+add rsp, 18h
 
 L_self_loop: jmp L_self_loop
 
@@ -99,101 +38,130 @@ mov rax, [rax]
 mov rax, [rax+20h]
 ret
 
+FindFuncByName:
+        ; 프로롤그 (비휘발 레지스터 보존 + 16바이트 정렬)
+        push    rbp
+        mov     rbp, rsp
+        push    rbx
+        push    rsi
+        push    rdi
+        push    r12
+        push    r14
+        push    r15
+        sub     rsp, 32                 ; shadow/local (정렬 유지)
 
-;HMODULE module, WORD Ordinal
-FindFuncByOrdinal:
+        mov     rbx, rcx                ; rbx = 모듈 베이스
+        mov     rsi, rdx                ; rsi = 찾을 함수 이름 포인터
 
-push rbp
-mov rbp, rsp
-push rcx
+        ; ---------------------------
+        ; NT 헤더 찾기: nt = base + e_lfanew
+        ; ---------------------------
+        mov     eax, DWORD PTR rbx+3Ch    ; e_lfanew
+        lea     r8,  [rbx+rax]              ; r8 = NT headers
 
-xor rcx, rcx
+        ; ---------------------------
+        ; Export Directory 가져오기
+        ; OptionalHeader.DataDirectory[0] (EXPORT) 의 RVA는
+        ; NT + 24(파일헤더 뒤) + 112(OptHdr64에서 DataDir 시작) = +136
+        ; ---------------------------
+        mov     eax, DWORD PTR r8+136     ; Export Directory RVA
+        test    eax, eax
+        jz      ffbn_not_found
+        lea     r14, [rbx+rax]              ; r14 = Export Directory (VA)
 
-mov rax, [rbp+16]
-movzx rcx, BYTE PTR rax+3Ch ;fanew
-add rcx, rax
+        ; 자주 쓰는 필드/테이블 주소
+        mov     eax, DWORD PTR r14+24     ; NumberOfNames
+        test    eax, eax
+        jz      ffbn_not_found
+        mov     r10d, eax                    ; r10d = NumberOfNames
 
-xor rax, rax
-mov eax, DWORD PTR rcx+136
-add rax, [rbp+16]
+        mov     eax, DWORD PTR r14+32     ; AddressOfNames RVA
+        lea     r15, [rbx+rax]               ; r15 = AddressOfNames (VA)
 
-xor rcx, rcx
-mov ecx, DWORD PTR rax+28
-add rcx, [rbp+16]
+        mov     eax, DWORD PTR r14+36     ; AddressOfNameOrdinals RVA
+        lea     rdi, [rbx+rax]               ; rdi = AddressOfNameOrdinals (VA)
 
-xor rax, rax
-mov eax, DWORD PTR rbp+24
-dec eax
-mov eax, DWORD PTR rcx+rax*4
+        ; 루프 인덱스 i = 0 .. NumberOfNames-1
+        xor     r12d, r12d                   ; r12d = i
 
-add rax, [rbp+16]
+ffbn_search_loop:
+        cmp     r12d, r10d
+        jae     ffbn_not_found
 
-pop rcx
-pop rbp
-ret 16
+        ; namePtr = base + ((DWORD*)AddressOfNames)[i]
+        mov     eax, DWORD PTR r15 + r12*4
+        lea     rdx, [rbx+rax]               ; rdx = 현재 이름 포인터
+        mov     rcx, rsi                     ; rcx = 찾을 이름 포인터
 
+        ; strcmp(targetName, namePtr)
+        call    strcmp
+        test    eax, eax
+        jz      ffbn_found                   ; 같다면 성공
+
+        inc     r12d
+        jmp     ffbn_search_loop
+
+ffbn_found:
+        ; ordinal = ((WORD*)AddressOfNameOrdinals)[i]
+        movzx   eax, WORD PTR rdi + r12*2  ; eax = ordinal (index)
+
+        ; funcVA = base + ((DWORD*)AddressOfFunctions)[ordinal]
+        mov     edx, DWORD PTR r14+28      ; AddressOfFunctions RVA
+        lea     rdx, [rbx+rdx]               ; rdx = AddressOfFunctions (VA)
+        mov     eax, DWORD PTR rdx + rax*4 ; eax = Function RVA
+        test    eax, eax
+        jz      ffbn_not_found               ; (희귀) 0이면 실패 취급
+
+        lea     rax, [rbx+rax]               ; rax = 실제 함수 주소
+        jmp     ffbn_exit
+
+ffbn_not_found:
+        xor     rax, rax                     ; 실패 시 0
+
+ffbn_exit:
+        add     rsp, 32
+        pop     r15
+        pop     r14
+        pop     r12
+        pop     rdi
+        pop     rsi
+        pop     rbx
+        pop     rbp
+        ret
+
+; ------------------------------------------------------------
+; int strcmp(const char* s1 /*RCX*/, const char* s2 /*RDX*/)
+;   - 같으면 0, 다르면 1 반환 (간단 비교)
+; ------------------------------------------------------------
+strcmp:
+strcmp_loop:
+        mov     al,  BYTE PTR rcx
+        mov     r8b, BYTE PTR rdx         ; r8b 사용: 비보존 RBX 건드리지 않기 위함
+        cmp     al, r8b
+        jne     strcmp_not_equal
+
+        test    al, al                      ; NUL?
+        jz      strcmp_equal
+
+        inc     rcx
+        inc     rdx
+        jmp     strcmp_loop
+
+strcmp_equal:
+        xor     eax, eax                    ; 0 (같음)
+        ret
+
+strcmp_not_equal:
+        mov     eax, 1                      ; 1 (다름)
+        ret
 
 ;-------------------------------------
 
-
-GetProcAddress = $-code_start
-DQ 0 
-
-_KERNEL = $-code_start
-DQ 0
-
-_BP = $-code_start
-DQ 0
-
-_PREV_STACK01 = $-code_start
-DQ 0
-
-_PREV_STACK02 = $-code_start
-DQ 0
-
-my_module = $-code_start
-DQ 0
-
-_USER32 = $-code_start
-DQ 0
-
-__func_init__ = $-code_start
-
-GetModuleHandleA = $-code_start
-DQ _str.GetModuleHandleA
-
-CreateThread = $-code_start
-DQ _str.CreateThread
-
-DQ 0
-
-
-__func_init_user__ = $-code_start
-
-MessageBoxA = $-code_start
-DQ _str.MessageBoxA 
-
-DQ 0
-
-
 _str:
-	.GetModuleHandleA = $-code_start
-	DB "GetModuleHandleA",0
-	
-	.CreateThread = $-code_start
-	DB "CreateThread",0
-	
-	.MessageBoxA = $-code_start
-	DB "MessageBoxA",0
-	
-	.my_module_name = $-code_start
-	DB "Test64Program.exe",0
+	.LoadLibraryA = $-code_start
+	DB "LoadLibraryA",0
 
+	.BridgePath = $-code_start
+	DB ".\\bridge64.dll",0
 
-	.USER32 = $-code_start
-	DB "USER32.DLL",0
-
-	.msg_success = $-code_start
-	DB "Success!",0
-	
 code_size = $-code_start
