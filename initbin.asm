@@ -17,16 +17,7 @@ mov rbp, rax
 call GetKernelModuleHandle
 mov QWORD PTR rbp+KERNEL32, rax
 
-lea rdx, [rbp+_str.GetCurrentThread]
-mov rcx, QWORD PTR rbp+KERNEL32
-call FindFuncByName
-call rax
-
 lea rdx, [rbp+_str.NUM_BUF01]
-mov rcx, rax
-call UInt64ToString
-
-lea rdx, [rbp+_str.NUM_BUF02]
 mov rcx, rbp
 call UInt64ToString
 
@@ -39,10 +30,6 @@ sub rsp, 18h
 mov rdx, rdi
 
 lea rdx, [rbp+_str.NUM_BUF01]
-lea rcx, QWORD PTR rbp+_str.CG_VAR_hThread
-call QWORD PTR rbp+SetEnvironmentVariableA
-
-lea rdx, [rbp+_str.NUM_BUF02]
 lea rcx, QWORD PTR rbp+_str.CG_VAR_BaseRBP
 call QWORD PTR rbp+SetEnvironmentVariableA
 
@@ -234,16 +221,10 @@ SetEnvironmentVariableA = $-code_start
 _str:
 	.LoadLibraryA = $-code_start
 	DB "LoadLibraryA",0
-	
-	.GetCurrentThread = $-code_start
-	DB "GetCurrentThread",0
-	
+
 	.SetEnvironmentVariableA = $-code_start
 	DB "SetEnvironmentVariableA",0
-	
-	.CG_VAR_hThread = $-code_start
-	DB "CG_VAR_hThread",0
-	
+
 	.CG_VAR_BaseRBP = $-code_start
 	DB "CG_VAR_BaseRBP",0
 
@@ -258,9 +239,6 @@ _str:
 	DB 0
 
 	.NUM_BUF01 = $-code_start
-	times 32 DB 0
-
-	.NUM_BUF02 = $-code_start
 	times 32 DB 0
 
 	DD 0CCCCCCCCh
